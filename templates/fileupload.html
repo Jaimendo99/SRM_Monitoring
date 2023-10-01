@@ -1,0 +1,28 @@
+ {# templates/fileupload.html #}
+ {% extends "basedoc.html" %}
+ {% block title %}Upload a CSV File{% endblock %}
+ {% block content %}
+ 
+     <h1>CSV Table Viewer</h1>
+
+     <form id="upload_form" method="post" enctype="multipart/form-data" hx-post="/validate" hx-target="#table-container" hx-swap="innerHTML" >
+     {{ form.csrf_token }}
+     {{ form.file(accept=".csv") }}
+     {{ form.validate }}
+
+     </form>
+
+     <button class="bg-red-500" name="submit" id="submit" disabled hx-encoding="multipart/form-data" hx-post="/upload_file" hx-target="#table-container" hx-swap="innerHTML" hx-include="#file">Upload and Display</button>
+
+    <div id="table-container"></div>
+
+     <script>
+     document.addEventListener('htmx:afterRequest', function () {
+         try {
+         document.getElementById("submit").disabled = document.getElementById("summary_entry").innerText.includes("Error");
+         } catch (error) {
+         }
+     });
+     </script>
+
+ {% endblock %}

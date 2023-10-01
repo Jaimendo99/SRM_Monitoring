@@ -1,0 +1,24 @@
+<div id="summary_entry">
+
+<p>Cantidad de ingresos: {{ entries }}<p/>
+{% if base_mislen|length >0 or serial_mislen|length >0%}
+    <div>Error</div>
+{% endif %}
+{% if duplicates %}
+    <p>Duplicados: {{ duplicates }}</p>
+{% endif %}
+{% if base_mislen %}
+    <p>Errores en base: {{ base_mislen|length }}</p>
+{% endif %}
+{% if serial_mislen %}
+    <p>Errores en serie: {{ serial_mislen|length }}</p>
+{% endif %}
+</div>
+{#{% if duplicates + base_mislen + serial_mislen %}#}
+{#    <p>Corrija los errores y vuelva a subir el archivo</p>#}
+{#{% endif %}#}
+<h1>Tabla de ingresos</h1>
+{{ table|safe }}
+
+
+

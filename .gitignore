@@ -1,0 +1,10 @@
+Fonts
+.idea
+node_modules
+*.ipynb
+*.exe
+venv
+.venv
+*.csv
+__pycache__/
+

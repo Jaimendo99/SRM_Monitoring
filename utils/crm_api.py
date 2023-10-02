@@ -1,7 +1,8 @@
 import httpx
 import asyncio
-
+import time
 import pandas as pd
+import datetime
 
 base_url = 'https://portaldas.claro.com.ec:12900/oc/u-route/'
 
@@ -97,8 +98,9 @@ async def aquery_client(async_client: httpx.AsyncClient, login_res, phone_number
         'Cookie': f"JSESSIONID={login_res['JESSIONID']}; u-token={login_res['u-token']}; bes_sna_cookie={login_res['sna_cookie']}",
         'u-token': f"{login_res['u-token']}"
     }
-
-    return data, await async_client.post(query_url, json=data, headers=headers)
+    res = await async_client.post(query_url, json=data, headers=headers)
+    res.raise_for_status()
+    return data, res
 
 
 async def aget_service_by_custid(async_client: httpx.AsyncClient, login_res, custId, subsId):
@@ -111,7 +113,9 @@ async def aget_service_by_custid(async_client: httpx.AsyncClient, login_res, cus
         'Cookie': f"JSESSIONID={login_res['JESSIONID']}; u-token={login_res['u-token']}; bes_sna_cookie={login_res['sna_cookie']}",
         'u-token': f"{login_res['u-token']}"
     }
-    return data, await async_client.post(url, json=data, headers=headers)
+    res = await async_client.post(url, json=data, headers=headers)
+    res.raise_for_status()
+    return data, res
 
 
 async def aget_consumo_by_service_number(async_client: httpx.AsyncClient, login_res, serviceNumber, TS_dateFrom,
@@ -140,7 +144,9 @@ async def aget_consumo_by_service_number(async_client: httpx.AsyncClient, login_
         'u-token': f"{login_res['u-token']}"
     }
 
-    return data, await async_client.post(consumos_url, json=data, headers=headers, timeout=60)
+    res = await async_client.post(consumos_url, json=data, headers=headers, timeout=60)
+    res.raise_for_status()
+    return data, res
 
 
 async def query_clients(async_client: httpx.AsyncClient, login_res, client_info_list: list, info_type: str):
@@ -162,7 +168,9 @@ async def get_services_by_custid(async_client: httpx.AsyncClient, login_res, cus
     return responses
 
 
-async def get_consumos_by_service_number(async_client: httpx.AsyncClient, login_res, serviceNumbers: list,TS_datesFrom: list, TS_datesTo: list, beginNumsReq: list = (), fetchNumsReq: list = ()):
+async def get_consumos_by_service_number(async_client: httpx.AsyncClient, login_res, serviceNumbers: list,
+                                         TS_datesFrom: list, TS_datesTo: list, beginNumsReq: list = (),
+                                         fetchNumsReq: list = ()):
     if len(serviceNumbers) != len(TS_datesFrom) or len(serviceNumbers) != len(TS_datesTo):
         raise Exception("serviceNumbers, TS_datesFrom and TS_datesTo must have the same length")
     if len(beginNumsReq) == 0:
@@ -222,19 +230,86 @@ def get_timestamps(timestamp: int | None):
     return [timestamp + i * 2592000 for i in range(1, 7)]
 
 
+def get_sc_state(activationDate):
+    current_ts = datetime.datetime.now().timestamp() * 1000
+    if pd.isna(activationDate):
+        return 0
+    time_since_activation = (current_ts - activationDate) / 1000
+
+    if time_since_activation < 30 * 86400:
+        return 1
+    elif time_since_activation < 60 * 86400:
+        return 30
+    elif time_since_activation < 90 * 86400:
+        return 60
+    elif time_since_activation < 120 * 86400:
+        return 90
+    elif time_since_activation < 150 * 86400:
+        return 120
+    elif time_since_activation < 180 * 86400:
+        return 150
+    else:
+        return 180
+
+
+def parse_consumos(consumos_res, n=30):
+    consumos = []
+    for i, consumo in enumerate(consumos_res):
+        serviceNumber = consumo[0]['params']['body']['serviceNumber']
+        summ = 0
+        try:
+            cdr_summary = consumo[1].json()['body']['cdrSummary']
+        except (KeyError, TypeError):
+            print('consumo', i)
+            cdr_summary = []
+        for summary in cdr_summary:
+            summ = summ + summary['summaryTotalChargeInfoList'][0]['actualChargeAmt']
+        consumos.append({'serviceNumber': serviceNumber, f'Consumo_{n}': summ})
+    return consumos
+
+
+async def fill_consumos(login_res, simc_df) -> pd.DataFrame:
+    previous_state = 'activationDate'
+    client = httpx.AsyncClient()
+    for state in [30, 60, 90, 120, 150, 180]:
+        date_upper_col = f'TS_{state}'
+        for_state = simc_df.loc[
+            simc_df['state'] >= state, [previous_state, date_upper_col, 'serviceNumber', 'state']]
+        if not for_state.shape[0]: break
+        cosmos_state = await get_consumos_by_service_number(
+            client, login_res, for_state['serviceNumber'].to_list(), for_state[previous_state].to_list(),
+            for_state[date_upper_col].to_list())
+        previous_state = date_upper_col
+        cosmos_state = parse_consumos(cosmos_state, n=state)
+        cosmos_state = pd.DataFrame(cosmos_state)
+        simc_df = pd.merge(simc_df, cosmos_state, on='serviceNumber', how='outer')
+        time.sleep(2)
+    await client.aclose()
+    return simc_df
+
+
 async def fill_crm_info(base_df: pd.DataFrame, login_res) -> pd.DataFrame:
-    # base_df: base, serie -> simCard = base+serie
     aclient = httpx.AsyncClient()
     query_by = (base_df['base'].astype(str) + base_df['serie'].astype(str)).to_list()
-    query_res_ls = asyncio.run(query_clients(aclient, login_res, query_by, 'sim_card'))
+    query_res_ls = await (query_clients(aclient, login_res[1], query_by, 'sim_card'))
     query_df = pd.DataFrame(parse_query_client(query_res_ls))  # custId, subsId, simCard
-    services_res = asyncio.run(
-        get_services_by_custid(aclient, login_res, query_df['custId'].to_list(), query_df['subsId'].to_list()))
-    services_df = pd.DataFrame(parse_service_by_custid(services_res))  # serviceNumber, activationDate, subsId
 
-    timestamps_df = services_df['activationDate'].apply(get_timestamps)
+    services_res = await (
+        get_services_by_custid(aclient, login_res[1], query_df['custId'].to_list(), query_df['subsId'].to_list()))
+    services_df = pd.DataFrame(parse_service_by_custid(services_res))
+    timestamps_df = services_df['activationDate'].apply(lambda x: get_timestamps(x))
     timestamps_df = pd.DataFrame(timestamps_df.to_list(),
-                                 columns=['TS_30', 'TS_60', 'TS_90', 'TS_120', 'TS_150', 'TS_180'])
-    await aclient.aclose()
+                                 columns=['TS_30', 'TS_60', 'TS_90', 'TS_120', 'TS_150', 'TS_180'], dtype='Int64')
+    services_df['activationDate'] = services_df['activationDate'].fillna(0).astype(
+        'int64')  # serviceNumber, activationDate, subsId
 
-    return pd.concat([base_df, query_df, services_df, timestamps_df], axis=1)
+    simcard_df = pd.merge(pd.concat([services_df, timestamps_df], axis=1), query_df, on='subsId')[
+        ['simCard', 'serviceNumber', 'custId', 'subsId', 'activationDate', 'TS_30', 'TS_60', 'TS_90', 'TS_120',
+         'TS_150', 'TS_180']].drop_duplicates()
+    simcard_df.loc[simcard_df['activationDate'] == 0, 'activationDate'] = simcard_df['TS_30']
+
+    simcard_df['state'] = simcard_df['activationDate'].apply(lambda x: get_sc_state(x))
+    simcard_df.to_csv("ENERO1_SIMCARD.csv", index=False)
+    consumo_df = await fill_consumos(login_res[1], simcard_df)
+
+    return consumo_df
